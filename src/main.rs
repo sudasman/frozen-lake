@@ -1,7 +1,3 @@
-// q-learning
+use frozen_lake::q_learning_algorithm;
 
-
-
-fn main() {
-    println!("Hello, world!");
-}
+fn main() {}
