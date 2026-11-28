@@ -8,12 +8,16 @@
 use std::collections::HashMap;
 use std::ops::{Index, IndexMut};
 
+const GRID: usize = 4;
+
 trait Environment {
     const ACTIONS: u8;
     type Observation;
     //will update agent's current_stage
-    fn step(&mut self, action: u8)
-    -> (Self::Observation, f64, bool, bool, HashMap<String, String>);
+    fn step(
+        &mut self,
+        action: (i8, i8),
+    ) -> (Self::Observation, f64, bool, bool, HashMap<String, String>);
     fn reset(&mut self) -> Self::Observation;
     //provide the guarantee that every type that impl Environment will have a field of type ActionSpace
     fn action_space<'a>(&'a self) -> &'a ActionSpace;
@@ -22,6 +26,7 @@ trait Environment {
 }
 
 struct FrozenLake {
+    map: [[u8; GRID]; GRID],
     current_state: u8,
     action_space: ActionSpace,
     is_slippery: bool,
@@ -45,9 +50,23 @@ impl Environment for FrozenLake {
     //State, Reward, Terminated, Truncated, Info
     fn step(
         &mut self,
-        action: u8,
+        action: (i8, i8),
     ) -> (Self::Observation, f64, bool, bool, HashMap<String, String>) {
-        todo!();
+        let state: Self::Observation = 0;
+        let reward: f64 = 0.0;
+        let terminated: bool = false;
+        let truncated: bool = false;
+        let info: HashMap<String, String> = HashMap::new();
+
+        //check bounds if hit wall give penalty(-reward)
+        //check if hit hole or goal (if so, terminated = true)
+        //if hit hole -> penalty
+        //if hit goal -> reward
+        //if steps hits max steps, truncated = true
+        //info: tbd
+
+
+    
     }
 
     fn reset(&mut self) -> Self::Observation {
@@ -65,6 +84,7 @@ impl Environment for FrozenLake {
     }
 }
 
+#[derive(Debug)]
 struct QTable<const STATES: usize, const ACTIONS: usize> {
     q_values: [[f64; ACTIONS]; STATES],
 }
@@ -152,7 +172,6 @@ struct TrainingConfig {
 }
 
 pub fn new() {
-    //3. finish epsilon greedy algorithm
     //4. build training loop (cpu)
     //5. test loop (cpu)
     //6. rewrite logic using gpu kernels
@@ -162,14 +181,20 @@ pub fn new() {
         max_steps: 50,
     };
 
-    let environment: FrozenLake = FrozenLake {
+    let mut environment: FrozenLake = FrozenLake {
+        map: loop {
+            let map = generate_map();
+            //break can return a value
+            if check_map(&map) {
+                break map;
+            }
+        },
         current_state: 0,
         action_space: ActionSpace,
         is_slippery: false,
     };
 
     //square grids
-    const GRID: usize = 4;
     const STATES: usize = GRID * GRID;
     const ACTIONS: usize = 4;
     let agent: Agent<STATES, ACTIONS> = Agent {
@@ -183,14 +208,28 @@ pub fn new() {
         discount_factor: 0.9,
         epsilon_decay: 0.001,
     };
+
+    //main training loop
+
+    println!("Q-table before training: {:?}", agent.q_table);
+
+    for _ in 0..training_config.episodes {
+        let state = &environment.reset();
+
+        let done = false;
+
+        while !done {
+            let action = epsilon_greedy(&agent.epsilon, &agent.q_table, &environment);
+        }
+    }
 }
 
 //exploration / expoitation
 fn epsilon_greedy<T, const STATES: usize, const ACTIONS: usize>(
-    epsilon: f64,
+    epsilon: &f64,
     q_table: &QTable<STATES, ACTIONS>,
     environment: &T,
-) -> u8
+) -> (i8, i8)
 //Observation
 where
     T: Environment,
@@ -199,33 +238,107 @@ where
 
     let mut rng = rand::rng();
     let rnd: f64 = rng.random();
-
-    //take random action
-    if rnd < epsilon {
-        return environment.action_space().sample(T::ACTIONS);
-    }
-
-    //argmax
-    let mut max: f64 = f64::NEG_INFINITY;
     let mut action: u8 = 0;
-    let mut ties = 0;
-    for (i, val) in q_table.q_values[*environment.current_state() as usize]
-        .into_iter()
-        .enumerate()
-    {
-        //max = row.iter().max_by(|a, b| a.total_cmp(b));
-        if val > max {
-            max = val;
-            action = i as u8;
-            ties = 1;
-        } else if val == max {
-            ties += 1;
-            //brute force but at least no additional memory allocation needed
-            if rng.random_range(0..ties) == 0 {
+    //take random action
+    if rnd < *epsilon {
+        action = environment.action_space().sample(T::ACTIONS);
+    } else {
+        //argmax
+        let mut max: f64 = f64::NEG_INFINITY;
+        let mut ties = 0;
+        for (i, val) in q_table.q_values[*environment.current_state() as usize]
+            .into_iter()
+            .enumerate()
+        {
+            //max = row.iter().max_by(|a, b| a.total_cmp(b));
+            if val > max {
+                max = val;
                 action = i as u8;
+                ties = 1;
+            } else if val == max {
+                ties += 1;
+                //brute force but at least no additional memory allocation needed
+                if rng.random_range(0..ties) == 0 {
+                    action = i as u8;
+                }
+            }
+        }
+    }
+    match action {
+        0 => (0, -1), // Left
+        1 => (1, 0),  // Down
+        2 => (0, 1),  // Right
+        3 => (-1, 0), // Up
+        _ => (0, 0),
+    }
+}
+
+fn generate_map() -> [[u8; GRID]; GRID] {
+    use rand::prelude::*;
+
+    const GRID: usize = 4;
+    let mut rng = rand::rng();
+    let mut map = [[0; GRID]; GRID];
+    let hole_probability = 5;
+    for row in 0..GRID {
+        for col in 0..GRID {
+            // Keep start and goal clear
+            if (row == 0 && col == 0) || (row == GRID - 1 && col == GRID - 1) {
+                continue;
+            }
+
+            if rng.random_range(0..hole_probability) == 0 {
+                map[row][col] = 1;
             }
         }
     }
 
-    action
+    map[GRID - 1][GRID - 1] = 2;
+
+    map
+}
+
+//just bfs
+fn check_map(map: &[[u8; GRID]; GRID]) -> bool {
+    //vector double ended queue
+    use std::collections::VecDeque;
+
+    let mut visited = [[false; GRID]; GRID];
+    let mut queue = VecDeque::new();
+
+    queue.push_back((0, 0));
+    visited[0][0] = true;
+
+    let directions: [(i8, i8); 4] = [
+        (-1, 0), // Up
+        (1, 0),  // Down
+        (0, -1), // Left
+        (0, 1),  // Right
+    ];
+
+    while let Some((row, col)) = queue.pop_front() {
+        //gets to goal
+        if map[row][col] == 2 {
+            return true;
+        }
+
+        for (dir_row, dir_col) in directions {
+            let next_row = row as i8 + dir_row;
+            let next_col = col as i8 + dir_col;
+
+            if next_row < 0 || next_row >= GRID as i8 || next_col < 0 || next_col >= GRID as i8 {
+                continue;
+            }
+
+            let next_row = next_row as usize;
+            let next_col = next_col as usize;
+
+            if !visited[next_row][next_col] && map[next_row][next_col] != 1 {
+                visited[next_row][next_col] = true;
+                queue.push_back((next_row, next_col));
+            }
+        }
+    }
+
+    false
 }
