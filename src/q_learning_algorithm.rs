@@ -17,7 +17,14 @@ trait Environment {
     fn step(
         &mut self,
         action: (i8, i8),
-    ) -> (Self::Observation, f64, bool, bool, HashMap<String, String>);
+        steps: &mut u32,
+    ) -> (
+        Self::Observation,
+        f64,
+        bool,
+        bool,
+        HashMap<&'static str, &'static str>,
+    );
     fn reset(&mut self) -> Self::Observation;
     //provide the guarantee that every type that impl Environment will have a field of type ActionSpace
     fn action_space<'a>(&'a self) -> &'a ActionSpace;
@@ -30,6 +37,8 @@ struct FrozenLake {
     current_state: u8,
     action_space: ActionSpace,
     is_slippery: bool,
+    //truncation
+    max_steps: u32,
 }
 
 struct ActionSpace;
@@ -51,22 +60,68 @@ impl Environment for FrozenLake {
     fn step(
         &mut self,
         action: (i8, i8),
-    ) -> (Self::Observation, f64, bool, bool, HashMap<String, String>) {
-        let state: Self::Observation = 0;
-        let reward: f64 = 0.0;
-        let terminated: bool = false;
-        let truncated: bool = false;
-        let info: HashMap<String, String> = HashMap::new();
+        steps: &mut u32,
+    ) -> (
+        Self::Observation,
+        f64,
+        bool,
+        bool,
+        HashMap<&'static str, &'static str>,
+    ) {
+        let mut info: HashMap<&'static str, &'static str> = HashMap::new();
 
-        //check bounds if hit wall give penalty(-reward)
-        //check if hit hole or goal (if so, terminated = true)
-        //if hit hole -> penalty
-        //if hit goal -> reward
-        //if steps hits max steps, truncated = true
-        //info: tbd
+        let row = (self.current_state / self.map.len() as u8) as i8 + action.0;
+        let col = (self.current_state % self.map.len() as u8) as i8 + action.1;
 
+        //tries to go out of bounds
+        //assumes square map
+        if row < 0 || col < 0 || row >= self.map.len() as i8 || col >= self.map.len() as i8 {
+            info.insert("Error", "Out of bounds");
+            //although it doesnt move, it will still count as a step
+            *steps += 1;
+            return (
+                self.current_state,
+                -0.05,
+                false,
+                *steps >= self.max_steps,
+                info,
+            );
+        }
 
-    
+        //lands in a hole
+        if self.map[row as usize][col as usize] == 1 {
+            info.insert("Error", "Landed in a hole");
+            *steps += 1;
+            return (
+                (row as usize * self.map[0].len() + col as usize) as u8,
+                -0.25,
+                true,
+                *steps >= self.max_steps,
+                info,
+            );
+        }
+        //reaches goal
+        else if self.map[row as usize][col as usize] == 2 {
+            info.insert("Success", "Reached Goal!");
+            *steps += 1;
+            return (
+                (row as usize * self.map[0].len() + col as usize) as u8,
+                1.0,
+                true,
+                *steps >= self.max_steps,
+                info,
+            );
+        }
+
+        info.insert("Move", "Successful");
+        *steps += 1;
+        (
+            (row as usize * self.map[0].len() + col as usize) as u8,
+            0.0,
+            false,
+            *steps >= self.max_steps,
+            info,
+        )
     }
 
     fn reset(&mut self) -> Self::Observation {
@@ -167,19 +222,13 @@ impl<const STATES: usize, const ACTIONS: usize> Agent<STATES, ACTIONS> {
 
 struct TrainingConfig {
     episodes: usize,
-    //truncation
-    max_steps: usize,
 }
 
 pub fn new() {
-    //4. build training loop (cpu)
     //5. test loop (cpu)
     //6. rewrite logic using gpu kernels
 
-    let training_config: TrainingConfig = TrainingConfig {
-        episodes: 100,
-        max_steps: 50,
-    };
+    let training_config: TrainingConfig = TrainingConfig { episodes: 100 };
 
     let mut environment: FrozenLake = FrozenLake {
         map: loop {
@@ -192,36 +241,71 @@ pub fn new() {
         current_state: 0,
         action_space: ActionSpace,
         is_slippery: false,
+        max_steps: 100,
     };
 
     //square grids
     const STATES: usize = GRID * GRID;
     const ACTIONS: usize = 4;
-    let agent: Agent<STATES, ACTIONS> = Agent {
+    let mut agent: Agent<STATES, ACTIONS> = Agent {
         q_table: QTable {
             q_values: [[0.0; ACTIONS]; STATES],
         },
         //exploration probability
         epsilon: 1.0,
-        learning_rate: 0.01,
+        learning_rate: 0.1,
         //between 0 and 1
         discount_factor: 0.9,
-        epsilon_decay: 0.001,
+        //exponential (non-linear)
+        epsilon_decay: 0.995,
     };
 
     //main training loop
 
     println!("Q-table before training: {:?}", agent.q_table);
 
-    for _ in 0..training_config.episodes {
+    println!("Map: {:?}", environment.map);
+    for i in 0..training_config.episodes {
         let state = &environment.reset();
+        let mut steps = 0;
+        let mut done = false;
+        let mut truncated = false;
 
-        let done = false;
+        //println!("Episode: {}", i + 1 );
+        while !done && !truncated {
+            let action: (u8, (i8, i8)) =
+                epsilon_greedy(&agent.epsilon, &agent.q_table, &environment);
 
-        while !done {
-            let action = epsilon_greedy(&agent.epsilon, &agent.q_table, &environment);
+            let (new_state, reward, d, t, info) = environment.step(action.1, &mut steps);
+
+            done = d;
+            truncated = t;
+
+            let max = if done {
+                0.0
+            } else {
+                agent.q_table.q_values[new_state as usize]
+                    .iter()
+                    .copied()
+                    .max_by(f64::total_cmp)
+                    .unwrap()
+            };
+
+            agent.q_table.q_values[environment.current_state as usize][action.0 as usize] =
+                agent.q_table.q_values[environment.current_state as usize][action.0 as usize]
+                    + agent.learning_rate
+                        * (reward + agent.discount_factor * max
+                            - agent.q_table.q_values[environment.current_state as usize]
+                                [action.0 as usize]);
+
+            environment.current_state = new_state;
         }
+        agent.epsilon = (agent.epsilon * agent.epsilon_decay).max(0.0);
     }
+
+    dbg!(agent.q_table.q_values);
+
+    //store each move and manually check 
 }
 
 //exploration / expoitation
@@ -229,7 +313,7 @@ fn epsilon_greedy<T, const STATES: usize, const ACTIONS: usize>(
     epsilon: &f64,
     q_table: &QTable<STATES, ACTIONS>,
     environment: &T,
-) -> (i8, i8)
+) -> (u8, (i8, i8))
 //Observation
 where
     T: Environment,
@@ -265,11 +349,11 @@ where
         }
     }
     match action {
-        0 => (0, -1), // Left
-        1 => (1, 0),  // Down
-        2 => (0, 1),  // Right
-        3 => (-1, 0), // Up
-        _ => (0, 0),
+        0 => (0, (0, -1)), // Left
+        1 => (1, (1, 0)),  // Down
+        2 => (2, (0, 1)),  // Right
+        3 => (3, (-1, 0)), // Up
+        _ => (0, (0, 0)),
     }
 }
 
