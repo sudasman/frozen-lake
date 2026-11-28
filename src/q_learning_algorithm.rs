@@ -206,15 +206,24 @@ where
     }
 
     //argmax
-    let max: f64 = 0.0;
+    let mut max: f64 = f64::NEG_INFINITY;
     let mut action: u8 = 0;
+    let mut ties = 0;
     for (i, val) in q_table.q_values[*environment.current_state() as usize]
         .into_iter()
         .enumerate()
     {
         //max = row.iter().max_by(|a, b| a.total_cmp(b));
         if val > max {
-            action = i as u8
+            max = val;
+            action = i as u8;
+            ties = 1;
+        } else if val == max {
+            ties += 1;
+            //brute force but at least no additional memory allocation needed
+            if rng.random_range(0..ties) == 0 {
+                action = i as u8;
+            }
         }
     }
 
